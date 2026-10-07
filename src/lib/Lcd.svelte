@@ -10,13 +10,16 @@
   const on = $derived(SEGMENTS[value] ?? '');
 </script>
 
-<span class="digit" class:off={!on}>
+<span class="digit">
   {#each ['a','b','c','d','e','f','g'] as s}
     <i class="seg {s}" class:lit={on.includes(s)}></i>
   {/each}
 </span>
 
 <style>
+  /* decimal dot rendered by the page between digits: .dot class lives there.
+     kept here as a shared style is not possible across components - the page
+     defines its own .dot with the same visual rules. */
   .digit {
     position: relative;
     width: 0.62em;

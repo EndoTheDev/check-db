@@ -1,14 +1,16 @@
 <script>
   import Lcd from '$lib/Lcd.svelte';
   import { windowDb, MeterStats } from '$lib/meter.js';
+  import { formatDb, calibrateOffset, SILENCE_FLOOR } from '$lib/format.js';
 
   // meter state
   let running = $state(false);
   let status = $state('idle'); // idle | running | denied | error
-  let db = $state('-100.0');
+  let rawSmoothed = $state(NaN); // raw dBFS (smoothed), before offset
   let mode = $state('fast'); // fast | slow
   let weighting = $state('A'); // A | C
-  let calOffset = $state(parseFloat(localStorage.getItem('check-db-cal') || '93'));
+  let calOffset = $state(parseFloat(localStorage.getItem('check-db-cal') || '120'));
+  let calTarget = $state(''); // one-point calibration: user-entered true dB
   let peak = $state(null);
   let minS = $state(null);
   let maxS = $state(null);
@@ -41,11 +43,10 @@
     if (!running) return;
     analyser.getFloatTimeDomainData(buf);
     const raw = windowDb(buf, weighting);
-    const sm = stats.push(raw, mode);
-    db = (sm + calOffset).toFixed(1);
-    peak = (stats.peak + calOffset).toFixed(1);
-    minS = (stats.min + calOffset).toFixed(1);
-    maxS = (stats.max + calOffset).toFixed(1);
+    rawSmoothed = stats.push(raw, mode);
+    peak = stats.peak + calOffset;
+    minS = stats.min === Infinity ? null : stats.min + calOffset;
+    maxS = stats.max === -Infinity ? null : stats.max + calOffset;
     raf = requestAnimationFrame(loop);
   }
 
@@ -58,26 +59,27 @@
 
   function toggle() { running ? stop() : start(); }
 
+  // one-point calibration: "the room is actually X dB right now" -> offset
+  function applyCalibration() {
+    const target = parseFloat(calTarget);
+    if (Number.isFinite(target) && Number.isFinite(rawSmoothed)) {
+      calOffset = calibrateOffset(rawSmoothed, target);
+    }
+  }
+
   $effect(() => { localStorage.setItem('check-db-cal', String(calOffset)); });
 
-  // zone for the readout color
+  const displayDb = $derived(
+    Number.isFinite(rawSmoothed) ? rawSmoothed + calOffset : SILENCE_FLOOR
+  );
+  const fmt = $derived(formatDb(displayDb));
   const zone = $derived.by(() => {
-    const v = parseFloat(db);
-    if (isNaN(v)) return 'quiet';
-    if (v >= 110) return 'red';
-    if (v >= 100) return 'loud';
-    if (v >= 85) return 'warn';
+    if (displayDb >= 110) return 'red';
+    if (displayDb >= 100) return 'loud';
+    if (displayDb >= 85) return 'warn';
     return 'quiet';
   });
-
-  const digits = $derived.by(() => {
-    // format: always one decimal; pad; -100.0 during idle
-    const s = db ?? '-100.0';
-    return s.replace('-', '').replace('.', '').padStart(4, ' ').split('').map((ch, i) => ({
-      ch: ch === ' ' ? ' ' : ch, key: i
-    }));
-  });
-  const neg = $derived((db ?? '').startsWith('-'));
+  const fmtStat = (v) => (v === null || !Number.isFinite(v)) ? '--' : v.toFixed(1);
 </script>
 
 <svelte:head>
@@ -90,8 +92,10 @@
   <p class="sub">real-time room loudness</p>
 
   <div class="lcd-frame" class:running>
-    {#if neg}<Lcd value="-" />{/if}
-    {#each digits as d (d.key)}<Lcd value={d.ch} />{/each}
+    {#if fmt.neg}<Lcd value="-" />{/if}
+    {#each [...fmt.intDigits] as ch, i (i)}<Lcd value={ch} />{/each}
+    <span class="dot" aria-hidden="true"></span>
+    <Lcd value={fmt.decDigits} />
     <span class="unit">dB</span>
   </div>
 
@@ -103,9 +107,9 @@
   </div>
 
   <div class="stats">
-    <span>peak <b>{peak ?? '--'}</b></span>
-    <span>min <b>{minS ?? '--'}</b></span>
-    <span>max <b>{maxS ?? '--'}</b></span>
+    <span>peak <b>{fmtStat(peak)}</b></span>
+    <span>min <b>{fmtStat(minS)}</b></span>
+    <span>max <b>{fmtStat(maxS)}</b></span>
   </div>
 
   <div class="controls">
@@ -120,10 +124,18 @@
     </div>
   </div>
 
-  <label class="cal">
-    calibration offset <b>+{calOffset.toFixed(0)}</b>
-    <input type="range" min="80" max="110" step="1" bind:value={calOffset} />
-  </label>
+  <div class="cal">
+    <div class="cal-point">
+      <label for="caltarget">calibrate: room is actually</label>
+      <input id="caltarget" type="number" min="20" max="140" step="0.5" bind:value={calTarget} placeholder="e.g. 55" />
+      <span>dB</span>
+      <button onclick={applyCalibration} disabled={!running || !calTarget}>SET</button>
+    </div>
+    <label class="cal-fine">
+      offset <b>+{calOffset.toFixed(0)}</b>
+      <input type="range" min="60" max="180" step="1" bind:value={calOffset} />
+    </label>
+  </div>
 
   {#if status === 'denied'}
     <p class="msg">Microphone access denied — allow it in your browser settings, then press START again.</p>
@@ -132,8 +144,9 @@
   {/if}
 
   <p class="disc">
-    Browser mics vary — calibrate once against a reference meter for accurate absolute values
-    (slider above). Relative changes are always exact. Audio never leaves your device.
+    Browser mics vary — enter the room's real level once (from a reference app or meter) and the
+    offset is computed for you; the slider fine-tunes. Relative changes are always exact.
+    Audio never leaves your device.
   </p>
 </main>
 
@@ -172,9 +185,12 @@
     border-radius: 6px;
     padding: 0.35em 0.5em 0.35em 0.6em;
     box-shadow: inset 0 0 1.5em rgba(0, 0, 0, 0.9);
-    filter: saturate(1.05);
   }
   .lcd-frame.running { border-color: #4a3f28; }
+  .dot {
+    align-self: flex-end;
+    margin: 0 0.14em 0.1em;
+  }
   .unit {
     font-size: 0.22em;
     align-self: flex-end;
@@ -205,6 +221,7 @@
     font-size: 0.85rem;
   }
   button:hover { border-color: var(--lcd); }
+  button:disabled { opacity: 0.4; cursor: default; }
   .main {
     background: var(--lcd);
     color: #14120e;
@@ -217,8 +234,21 @@
   .toggles { display: flex; gap: 0.4rem; }
   .toggles button.off { color: var(--dim); border-color: #2a261e; }
 
-  .cal { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; font-size: 0.75rem; color: var(--dim); }
+  .cal { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; font-size: 0.75rem; color: var(--dim); }
   .cal b { color: var(--ink); }
+  .cal-point { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
+  .cal-point input {
+    width: 5em;
+    background: #0c0a07;
+    border: 1px solid #3a352a;
+    color: var(--lcd);
+    font-family: inherit;
+    padding: 0.3rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    text-align: center;
+  }
+  .cal-fine { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; }
   input[type='range'] { width: 220px; accent-color: var(--lcd); }
 
   .msg { color: #e0762f; font-size: 0.8rem; margin: 0; }

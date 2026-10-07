@@ -1,62 +1,74 @@
-// Self-check: synthetic signals through the meter engine must produce known dB.
-// Run in CI/build via `node selfcheck.js` (plain node, no deps).
-import { windowDb, MeterStats, AWeighting } from './src/lib/meter.js';
+// Self-check: synthetic signals through the meter engine must produce known dB,
+// and LCD formatting must be unambiguous. Run in CI via `node selfcheck.js`.
+import { windowDb, MeterStats } from './src/lib/meter.js';
+import { formatDb, calibrateOffset } from './src/lib/format.js';
 
 let failures = 0;
-function assertClose(name, got, want, tol) {
-  const ok = Math.abs(got - want) <= tol;
+function check(name, ok, detail = '') {
   if (!ok) failures++;
-  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}: got ${got.toFixed(2)} want ${want.toFixed(2)} (±${tol})`);
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ': ' + detail : ''}`);
+}
+function assertClose(name, got, want, tol) {
+  check(name, Math.abs(got - want) <= tol, `got ${got.toFixed(2)} want ${want.toFixed(2)} (±${tol})`);
 }
 
-// 1. Full-scale 997Hz sine (997 = SMPTE standard freq, avoids aliases) => 0 dBFS
+// --- DSP checks ---
+// 1. Full-scale 997Hz sine (SMPEG std freq): RMS of a sine = amp/sqrt(2) => -3.01 dBFS
 {
   const N = 48000;
   const buf = new Float32Array(N);
   for (let i = 0; i < N; i++) buf[i] = Math.sin(2 * Math.PI * 997 * (i / 48000));
-  assertClose('C-weighted FS sine = 0 dBFS', windowDb(buf, 'C'), -3.01, 0.1);
-  // RMS of a sine is amplitude/sqrt(2) => -3.01 dB; documented behavior.
+  assertClose('C-weighted FS sine = -3.01 dBFS', windowDb(buf, 'C'), -3.01, 0.1);
 }
-
-// 2. Half amplitude => -3 dB relative
+// 2. Half amplitude: 0.5/sqrt(2) => -9.03 dBFS
 {
   const N = 48000;
   const buf = new Float32Array(N);
   for (let i = 0; i < N; i++) buf[i] = 0.5 * Math.sin(2 * Math.PI * 997 * (i / 48000));
-  // RMS of a sine = amp/sqrt(2); 0.5/sqrt(2) => -9.03 dBFS
   assertClose('C-weighted half sine = -9.03 dB', windowDb(buf, 'C'), -9.03, 0.1);
 }
-
-// 3. A-weighting: 1 kHz must be the 0-point; low bass must read far below C
+// 3. A-weighting shape: low bass reads far below C
 {
   const N = 48000;
-  const mk = (f, a) => {
+  const mk = (f) => {
     const b = new Float32Array(N);
-    for (let i = 0; i < N; i++) b[i] = a * Math.sin(2 * Math.PI * f * (i / 48000));
+    for (let i = 0; i < N; i++) b[i] = Math.sin(2 * Math.PI * f * (i / 48000));
     return b;
   };
-  const db1k = windowDb(mk(1000, 1), 'A');
-  const db50 = windowDb(mk(50, 1), 'A');
-  const dbC50 = windowDb(mk(50, 1), 'C');
-  assertClose('A-weight @1kHz ~= A-weight @1kHz (sanity)', db1k, db1k, 0.01);
-  if (db50 >= dbC50 - 20) { failures++; }
-  console.log(`${db50 < dbC50 - 20 ? 'PASS' : 'FAIL'} A-weighted 50Hz reads >=20dB under C (got ${db50.toFixed(1)} vs ${dbC50.toFixed(1)})`);
+  const db50a = windowDb(mk(50), 'A');
+  const db50c = windowDb(mk(50), 'C');
+  check('A-weighted 50Hz reads >=20dB under C', db50a < db50c - 20, `${db50a.toFixed(1)} vs ${db50c.toFixed(1)}`);
 }
-
-// 4. MeterStats: peak/min/max tracking + smoothing converges
+// 4. MeterStats: smoothing + peak/min/max
 {
   const m = new MeterStats();
   for (let i = 0; i < 300; i++) m.push(-40, 'fast');
-  const v1 = m.smoothed;
-  if (Math.abs(v1 - -40) > 2) { failures++; console.log(`FAIL smoothing convergence: ${v1}`); }
-  else console.log(`PASS smoothing converges to -40 (${v1.toFixed(2)})`);
+  check('smoothing converges to -40', Math.abs(m.smoothed - -40) <= 2, m.smoothed.toFixed(2));
   m.push(-10, 'fast');
   m.push(-60, 'fast');
-  if (m.peak !== -10) { failures++; console.log(`FAIL peak hold: ${m.peak}`); }
-  else console.log(`PASS peak hold = -10`);
-  if (m.max !== -10 || m.min !== -60) { failures++; console.log(`FAIL min/max: ${m.min}/${m.max}`); }
-  else console.log(`PASS min/max tracked`);
+  check('peak hold = -10', m.peak === -10);
+  check('min/max tracked', m.max === -10 && m.min === -60, `${m.min}/${m.max}`);
 }
+
+// --- LCD format checks (the 168-vs-16.8 fix) ---
+check('16.8 -> int "16" dec "8" (not "168")',
+  (() => { const f = formatDb(16.8); return f.intDigits === '16' && f.decDigits === '8' && !f.neg; })(),
+  JSON.stringify(formatDb(16.8)));
+check('-6.8 -> neg, int "6" dec "8"',
+  (() => { const f = formatDb(-6.8); return f.neg && f.intDigits === '6' && f.decDigits === '8'; })(),
+  JSON.stringify(formatDb(-6.8)));
+check('105.3 -> int "105" dec "3"',
+  (() => { const f = formatDb(105.3); return f.intDigits === '105' && f.decDigits === '3' && !f.neg; })(),
+  JSON.stringify(formatDb(105.3)));
+check('silence floor clamps at -120',
+  (() => { const f = formatDb(-160.0); return f.neg && f.intDigits === '120' && f.decDigits === '0'; })(),
+  JSON.stringify(formatDb(-160.0)));
+check('NaN -> floor, not crash',
+  (() => { const f = formatDb(NaN); return f.neg && f.intDigits === '120'; })(),
+  JSON.stringify(formatDb(NaN)));
+
+// --- calibration math ---
+assertClose('calibrateOffset(-63.2, 55) = 118.2', calibrateOffset(-63.2, 55), 118.2, 0.01);
 
 console.log(failures === 0 ? 'ALL CHECKS PASSED' : `${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

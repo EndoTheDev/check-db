@@ -1,0 +1,19 @@
+services:
+  check-db:
+    container_name: tools-check-db
+    build: .
+    image: ghcr.io/endothedev/check-db:latest
+    labels:
+      - "traefik.enable=true"
+      # ponytail: NO strip-prefix - the app sets paths.base /tools/check-db and
+      # expects the full path (asset urls resolve under it). XOR rule proven on
+      # camelot and check-bpm.
+      - "traefik.http.routers.tools-check-db.rule=Host(`endothe.dev`) && PathPrefix(`/tools/check-db`)"
+      - "traefik.http.services.tools-check-db.loadbalancer.server.port=3000"
+    networks:
+      - services
+    restart: unless-stopped
+
+networks:
+  services:
+    external: true

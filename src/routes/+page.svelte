@@ -151,6 +151,9 @@
 </main>
 
 <style>
+  /* dark values are the default; light overrides kick in via OS preference.
+  the LCD stays amber-on-dark in both - it's a physical gadget, real SPL
+  meters don't invert with the room lights. */
   :global(:root) {
     --bg: #14120e;
     --panel: #1d1a14;
@@ -158,6 +161,17 @@
     --lcd-glow: rgba(255, 176, 0, 0.6);
     --ink: #d8d2c4;
     --dim: #6b6455;
+    --line: #3a352a;
+    --lcd-bg: #0c0a07;
+  }
+  @media (prefers-color-scheme: light) {
+    :global(:root) {
+      --bg: #f2efe8;
+      --panel: #ffffff;
+      --ink: #2a261e;
+      --dim: #8a8272;
+      --line: #c9c4b4;
+    }
   }
   main {
     min-height: 100svh;
@@ -213,7 +227,7 @@
     font-family: inherit;
     background: transparent;
     color: var(--ink);
-    border: 1px solid #3a352a;
+    border: 1px solid var(--line);
     border-radius: 4px;
     padding: 0.45rem 1.1rem;
     cursor: pointer;
@@ -232,15 +246,15 @@
   }
   .main.on { background: #7a2e22; color: #ffb9a8; }
   .toggles { display: flex; gap: 0.4rem; }
-  .toggles button.off { color: var(--dim); border-color: #2a261e; }
+  .toggles button.off { color: var(--dim); border-color: var(--line); }
 
   .cal { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; font-size: 0.75rem; color: var(--dim); }
   .cal b { color: var(--ink); }
   .cal-point { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
   .cal-point input {
     width: 5em;
-    background: #0c0a07;
-    border: 1px solid #3a352a;
+    background: var(--lcd-bg);
+    border: 1px solid var(--line);
     color: var(--lcd);
     font-family: inherit;
     padding: 0.3rem 0.4rem;
